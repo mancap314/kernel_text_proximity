@@ -1,8 +1,7 @@
 import os, re, time
-from sklearn.neighbors.kde import KernelDensity
-from sklearn.model_selection import GridSearchCV
 import numpy as np
-import utils
+import pandas as pd
+from sklearn.metrics import average_precision_score
 
 NLP_RESOURCE_DIRECTORY = os.path.join(os.path.expanduser('~'), 'nlp-resources')
 
@@ -30,7 +29,6 @@ def get_words_vector(words):
     return res
 
 
-
 def get_articles_matrices(articles):
     result = []
     concatenation = ' '.join(*[articles]).lower()
@@ -47,6 +45,7 @@ def get_articles_matrices(articles):
         article_matrix = None
         for i, word in enumerate(article_words):
             if word in words_vector:
+                # TODO: find better default distance
                 vector = np.append(words_vector[word], i / (len(article_words) - 1))
                 vector = vector.reshape((vector.shape[0], 1))
                 if article_matrix is None:
@@ -57,31 +56,75 @@ def get_articles_matrices(articles):
     return result
 
 
-def compare(article_0, article_1):
-    article_matrices = get_articles_matrices([article_0, article_1])
-    params = {'bandwidth': np.logspace(-1, 1, 20)}
-
-    grid = GridSearchCV(KernelDensity(), params, cv=5)
-    grid.fit(article_matrices[0].T)
-
-    kde_0 = grid.best_estimator_
-
-
-    grid = GridSearchCV(KernelDensity(), params, cv=5)
-    grid.fit(article_matrices[1].T)
-    kde_1 = grid.best_estimator_
-    new_data_1 = kde_1.sample(article_matrices[0].shape[1], random_state=0)
-
-    score = kde_0.score(new_data_1)
-    return score
+def get_sq_distances(matrix_0, matrix_1):
+    sq_dists = None
+    for i in range(matrix_0.shape[1]):
+        vector = matrix_0[:,i]
+        vector = vector.reshape((vector.shape[0], 1))
+        sq_dist = np.sum(np.square(matrix_1 - vector), 0)
+        sq_dist = sq_dist.reshape((sq_dist.shape[0], 1))
+        if sq_dists is None:
+            sq_dists = sq_dist
+        else:
+            sq_dists = np.concatenate((sq_dists, sq_dist), 1)
+    return sq_dists
 
 
-# # similar article
-# print(compare('tomorrow it will rain. Horrible weather is expected', 'in one day there will be bad weather. People wait for better times'))
-# # -1087.2591809224195
-#
-# # unsimilar article
-# print(compare('yesterday the president said he does not care at all. People are deceid', 'there was a big fire in the forest in greec, 1000 people were evacuated'))
-# # -2758.4067761311753
-#
-# # the more negative, the more unsimilar, as expected
+def get_min_sq_distances(article_0, article_1):
+    matrices = get_articles_matrices([article_0, article_1])
+    sq_distances = get_sq_distances(matrices[0], matrices[1])
+    a = sq_distances.shape.index(min(sq_distances.shape))
+    return np.min(sq_distances, axis=a)
+
+
+def get_score(sq_distances, l=.1):
+    return np.sum(np.exp(-sq_distances / l ** 2))
+
+# TODO: refactor calibrate and evaluate to externalize common actions
+# TODO: get matrices for all articles at once (much faster)
+
+def calibrate_l(df, col_0, col_1, col_score, l_values):
+    sq_distances_list = []
+    for i, row in df.iterrows():
+        sq_distances_list.append(get_min_sq_distances(row[col_0], row[col_1]))
+
+    ap_score_best, l_best = -1, None
+    for l in l_values:
+        scores = [get_score(sq_distances, l) for sq_distances in sq_distances_list]
+        min_score, max_score = min(scores), max(scores)
+        scores = [(s - min_score) / (max_score - min_score) for s in scores]
+        scores = pd.Series(scores)
+        ap_score = average_precision_score(df[col_score], scores)
+        if ap_score > ap_score_best:
+            ap_score_best = ap_score
+            l_best = l
+
+    return l_best, ap_score_best
+
+
+def evaluate(df, col_0, col_1, l):
+    sq_distances_list = []
+    for i, row in df.iterrows():
+        sq_distances_list.append(get_min_sq_distances(row[col_0], row[col_1]))
+
+    scores = [get_score(sq_distances, l) for sq_distances in sq_distances_list]
+    min_score, max_score = min(scores), max(scores)
+    scores = [(s - min_score) / (max_score - min_score) for s in scores]
+    scores = pd.Series(scores)
+    return scores
+
+
+# # Example score
+# score = compare('tomorrow it will rain. Horrible weather is expected', 'in one day there will be bad weather. People wait for better times')
+# print('score: {}'.format(score))
+
+# # Example calibration
+# df = pd.read_csv(os.path.join('data', 'questions.csv')).iloc[:10]
+# l_best, ap_score_best = calibrate_l(df, 'question1', 'question2', 'is_duplicate', np.linspace(.001, 1, 100))
+# print('l_best: {}, corresponding best average precision: {}'.format(l_best, ap_score_best))
+
+# Example evaluation
+df = pd.read_csv(os.path.join('data', 'questions.csv')).iloc[:10]
+scores = evaluate(df, 'question1', 'question2', l=.15)
+print(scores)
+print(df['is_duplicate'])

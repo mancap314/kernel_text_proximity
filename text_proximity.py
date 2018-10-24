@@ -90,74 +90,96 @@ def get_sq_distances(matrix_0, matrix_1):
     return np.min(sq_dists, axis=a)
 
 
-def get_score(sq_distances, l=.1):
+def get_score(sq_distances, l=.1, kernel='gaussian'):
     if sq_distances is None:
         return -1
-    return np.mean(np.exp(-sq_distances / l ** 2))  # mean instead of sum
+    if kernel == 'gaussian':
+        return np.mean(np.exp(-sq_distances / l ** 2))  # mean instead of sum
+    if kernel == 'inverse':
+        return np.mean(np.minimum(l / sq_distances, 1))
+    if kernel == 'triangle':
+        return np.mean(np.maximum(1 - l * np.abs(sq_distances), 0))
+    if kernel == 'epanechnikov':
+        return np.mean(np.maximum(1 - l ** 2 * np.square(sq_distances), 0))
+    if kernel == 'quadratic':
+        return np.mean(np.maximum(np.square(1 - l ** 2 * np.square(sq_distances)), 0))
+    if kernel == 'cubic':
+        return np.mean(np.maximum(np.power(1 - l ** 2 * np.square(sq_distances), 3), 0))
+    if kernel == 'circular':
+        return np.mean(np.maximum(np.cos(np.pi / 2 * l * sq_distances), 0))
 
 
-def get_scores_pairs(articles_0, articles_1, eps, l, relevant_embeddings):
+
+def get_scores_pairs(articles_0, articles_1, eps, l, relevant_embeddings, kernel):
     scores = []
     for i in range(len(articles_0)):
         matrices = get_articles_matrices([articles_0[i], articles_1[i]], relevant_embeddings)
         append_word_distance(matrices, eps)
         matrix_0, matrix_1 = matrices[0], matrices[1]
         sq_distances = get_sq_distances(matrix_0, matrix_1)
-        score = get_score(sq_distances, l)
+        score = get_score(sq_distances, l, kernel)
         scores.append(score)
     min_score, max_score = min(scores), max(scores)
     scores = pd.Series([(s - min_score) / (max_score - min_score) for s in scores])
     return scores
 
 
-def calibrate(articles_0, articles_1, true_values, word_embedding_file_path, l_values, eps_values, prop=1, language='english'):
+def calibrate(articles_0, articles_1, true_values, word_embedding_file_path, l_values, eps_values, kernels=['gaussian'], prop=1, language='english', normalize=True):
     assert len(articles_0) == len(articles_1), 'article_0 (length={}) must have same length than article_1 (length={})'.format(len(articles_0), len(articles_1))
-    relevant_embeddings = get_relevant_embeddings(articles_0 + articles_1, word_embedding_file_path, language)
+    relevant_embeddings = get_relevant_embeddings(articles_0 + articles_1, word_embedding_file_path, language, normalize)
 
     print('searching for best l and eps values...')
     t0 = time.time()
     y_true = pd.Series(true_values)
-    ap_score_best, l_best, eps_best = -1, None, None
-    values_to_test = list(itertools.product(*[l_values, eps_values]))
+    ap_score_best, kernel_best, l_best, eps_best = -1, None, None, None
+    values_to_test = list(itertools.product(*[kernels, l_values, eps_values]))
     indices_to_test = np.random.choice(len(values_to_test), size=int(round(prop * len(values_to_test))), replace=False)
     indices_to_test = [int(ind) for ind in indices_to_test]
     values_to_test = list(operator.itemgetter(*indices_to_test)(values_to_test))
 
-    for l, eps in values_to_test:
-        scores = get_scores_pairs(articles_0, articles_1, eps, l, relevant_embeddings)
+    for kernel, l, eps in values_to_test:
+        scores = get_scores_pairs(articles_0, articles_1, eps, l, relevant_embeddings, kernel)
         ap_score = average_precision_score(y_true[scores >= 0], scores[scores >= 0])
         if ap_score > ap_score_best:
             ap_score_best = ap_score
+            kernel_best = kernel
             l_best = l
             eps_best = eps
-            print('better parameters found: l_best={}, eps_best={}, corresponding best average precision: {}'.format(l_best, eps_best, ap_score_best))
+            print('better parameters found: kernel=\'{}\', l_best={}, eps_best={}, corresponding best average precision: {}'.format(kernel_best, l_best, eps_best, ap_score_best))
 
     print('best l and eps values out of {} combinations from {} pairs computed in {}s'.format(len(values_to_test), len(articles_0), round(time.time() - t0, 1)))
-    return l_best, eps_best, ap_score_best
+    return kernel_best, l_best, eps_best, ap_score_best
 
 
-def evaluate(articles_0, articles_1, l, eps, word_embedding_file_path, language='english'):
+def evaluate(articles_0, articles_1, l, eps, word_embedding_file_path, kernel='gaussian', language='english', normalize=False):
     assert len(articles_0) == len(articles_1), 'article_0 (length={}) must have same length than article_1 (length={})'.format(len(articles_0), len(articles_1))
-    relevant_embeddings = get_relevant_embeddings(articles_0 + articles_1, word_embedding_file_path, language)
+    relevant_embeddings = get_relevant_embeddings(articles_0 + articles_1, word_embedding_file_path, language, normalize)
     print('computing pair scores...')
     t0 = time.time()
-    scores = get_scores_pairs(articles_0, articles_1, eps, l, relevant_embeddings)
+    scores = get_scores_pairs(articles_0, articles_1, eps, l, relevant_embeddings, kernel)
     print('scores for {} pairs computed in {}s'.format(len(articles_0), round(time.time() - t0, 1)))
     return scores
 
 
 # TODO: test handling of empty (None) article matrix
 
-# # # Define embedding file
+# # Define embedding file
 # NLP_RESOURCE_DIRECTORY = os.path.join(os.path.expanduser('~'), 'nlp-resources')
 # word_embedding_file_path = os.path.join(NLP_RESOURCE_DIRECTORY, 'glove.840B.300d.txt')
-
+#
 # # Example calibration
 # df = pd.read_csv(os.path.join('data', 'questions.csv')).iloc[:1000].dropna().reset_index(drop=True)
-# l_best, eps_best, ap_score_best = calibrate(df['question1'].tolist(), df['question2'].tolist(), df['is_duplicate'], word_embedding_file_path, np.linspace(.00001, .005, 100), np.linspace(.5, 3, 30), .1)
-# # l_best, eps_best, ap_score_best = calibrate_l(df, 'question1', 'question2', 'is_duplicate', np.linspace(.0001, .2, 100), [0], 1)
-# print('l_best: {}, eps_best: {}, corresponding best average precision: {}'.format(l_best, eps_best, ap_score_best))
-# # l_best: 0.0001, eps_best: 0.5526315789473684, corresponding best average precision: 0.5541396202974052
+# kernel_best, l_best, eps_best, ap_score_best = calibrate(df['question1'].tolist(),
+#                                                          df['question2'].tolist(),
+#                                                          df['is_duplicate'],
+#                                                          word_embedding_file_path,
+#                                                          np.linspace(.00001, .005, 100),
+#                                                          np.linspace(.1, 1.5, 45),
+#                                                          ['gaussian', 'inverse', 'triangle', 'quadratic', 'cubic', 'circular'],
+#                                                          .3)
+# l_best, eps_best, ap_score_best = calibrate_l(df, 'question1', 'question2', 'is_duplicate', np.linspace(.0001, .2, 100), [0], 1)
+# print('kernel_best: {}, l_best: {}, eps_best: {}, corresponding best average precision: {}'.format(kernel_best, l_best, eps_best, ap_score_best))
+# # better parameters found: kernel='inverse', l_best=0.0031350505050505057, eps_best=0.19545454545454544, corresponding best average precision: 0.5657050176417399
 
 # # Example evaluation
 # df = pd.read_csv(os.path.join('data', 'questions.csv')).dropna().reset_index(drop=True)

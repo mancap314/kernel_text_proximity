@@ -1,6 +1,7 @@
 import re, time, itertools, operator, nltk, logging
 import numpy as np
 import pandas as pd
+from sklearn.metrics.pairwise import cosine_distances
 from sklearn.metrics import average_precision_score
 from hyperopt import fmin, tpe, hp
 
@@ -11,6 +12,11 @@ formatter = logging.Formatter('%(levelname)-8s: %(asctime)s, %(name)-12s, %(func
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.setLevel(logging.DEBUG)
+
+
+def set_logger_level(level):
+    """level: a level of logging"""
+    logger.setLevel(level)
 
 
 def get_stop_words(language='english'):
@@ -99,12 +105,28 @@ def append_word_distance(article_matrix_list, length):
     return article_matrix_list
 
 
-def get_sq_distances(matrix_0, matrix_1):
+def get_distances(matrix_0, matrix_1, method='euclidian'):
     """
-    Computes square euclidian distances between columns of `matrix_0` and `matrix_1`
+    Computes distances between columns of `matrix_0` and `matrix_1`
     :param matrix_0: first numpy ndarray
     :param matrix_1: second numpy ndarray
-    :return: numpy ndarray corresponding where x[i, j] = square euclidian distance between column i of `matrix_0`
+    :param method: 'euclidian' or 'cosine'
+    :return: numpy ndarray corresponding where x[i, j] = euclidian (or cosine) distance between column i of `matrix_0`
+    and column j of `matrix_1` (or reversely if `matrix_1` has less columns than `matrix_0`)
+    """
+    if method == 'euclidian':
+        distances = get_euclidian_distances(matrix_0, matrix_1)
+    if method == 'cosine':
+        distances = get_cosine_distances(matrix_0, matrix_1)
+    return distances
+
+
+def get_euclidian_distances(matrix_0, matrix_1):
+    """
+    Computes euclidian distances between columns of `matrix_0` and `matrix_1`
+    :param matrix_0: first numpy ndarray
+    :param matrix_1: second numpy ndarray
+    :return: numpy ndarray corresponding where x[i, j] = euclidian distance between column i of `matrix_0`
     and column j of `matrix_1` (or reversely if `matrix_1` has less columns than `matrix_0`)
     """
     if matrix_0 is None or matrix_1 is None:
@@ -121,10 +143,27 @@ def get_sq_distances(matrix_0, matrix_1):
             sq_dists = sq_dist
         else:
             sq_dists = np.concatenate((sq_dists, sq_dist), 1)
-    return sq_dists
+    return np.sqrt(sq_dists)
 
 
-def get_score(sq_distances, scale=.1, kernel='gaussian'):
+def get_cosine_distances(matrix_0, matrix_1):
+    """
+    Computes cosine distances between columns of `matrix_0` and `matrix_1`
+    :param matrix_0: first numpy ndarray
+    :param matrix_1: second numpy ndarray
+    :return: numpy nd array where x[i, j] = cosine distance between column i of `matrix_0`
+    and column j of `matrix_1` (or reversely if `matrix_1` has less columns than `matrix_0`)
+    """
+    if matrix_0 is None or matrix_1 is None:
+        return None
+    cos_dists = cosine_distances(matrix_0.T, matrix_1.T)
+    if cos_dists.shape[0] < cos_dists.shape[1]:
+        cos_dists = cos_dists.T
+    return cos_dists
+
+
+
+def get_score(distances, scale=.1, kernel='gaussian'):
     """
     Computes kernel value for each entry of `sq_distances`, sum them by colum (word) and takes the mean value
     :param sq_distances: numpy nd array as returned by get_sq_distances()
@@ -133,43 +172,44 @@ def get_score(sq_distances, scale=.1, kernel='gaussian'):
     'student'). Default: 'gaussian'
     :return: float corresponding to the mean of the kernel values by column
     """
-    if sq_distances is None:
+    if distances is None:
         return -1
     eps = .0001
     if scale == 0:
         scale += eps
     if kernel in ['inverse', 'circular']:  # kernels with division by `sq_distances`
-        sq_distances[sq_distances==0] = eps
-    sq_distances /= scale ** 2
+        distances[distances==0] = eps
+    distances /= scale ** 2
     if kernel == 'gaussian':
-        transfo = np.exp(-sq_distances)
+        transfo = np.exp(-distances)
     if kernel == 'inverse':
-        transfo = np.minimum(1 / np.square(sq_distances), 1)
+        transfo = np.minimum(1 / np.square(distances), 1)
     if kernel == 'triangle':
-        transfo = np.maximum(1 - np.square(sq_distances), 0)
+        transfo = np.maximum(1 - np.square(distances), 0)
     if kernel == 'epanechnikov':
-        transfo = np.maximum(1 - np.square(sq_distances), 0)
+        transfo = np.maximum(1 - np.square(distances), 0)
     if kernel == 'quadratic':
-        transfo = np.maximum(np.square(1 -np.square(sq_distances)), 0)
+        transfo = np.maximum(np.square(1 -np.square(distances)), 0)
     if kernel == 'cubic':
-        transfo = np.maximum(np.power(1 - np.square(sq_distances), 3), 0)
+        transfo = np.maximum(np.power(1 - np.square(distances), 3), 0)
     if kernel == 'circular':
-        transfo = np.maximum(np.cos(np.pi / (2 * sq_distances)), 0)
+        transfo = np.maximum(np.cos(np.pi / (2 * distances)), 0)
     if kernel == 'student':
-        transfo = 1 / (1 + sq_distances ** 2)
+        transfo = 1 / (1 + distances ** 2)
     return np.mean(np.sum(transfo, 0))  # compute the sum by word (axis 0) and take the average
 
 
-def get_scores_pairs(articles_0, articles_1, scale, length, relevant_embeddings, kernel):
+def get_scores_pairs(articles_0, articles_1, scale, length, relevant_embeddings, kernel, distance='euclidian', minmaxscale=True):
     """
-    Computes (scaled) proximity between the articles in `articles_0` and the articles in `articles_1`
+    Computes  proximity between the articles in `articles_0` and the articles in `articles_1`
     :param articles_0: first list of articles (texts, strings)
     :param articles_1: second list of articles (texts, strings) with which the articles in `articles_0` will be compared
     :param scale: scale parameter of `kernel`
     :param length: length paramter of `kernel`
-    :param relevant_embeddings: dic as returned by get_relevant_embeddings()
+    :param relevant_embeddings: dict as returned by get_relevant_embeddings()
     :param kernel: string, one of the values accepted by get_score()
-    :return: min_max scaled pandas Series of proximity scores between the articles in `articles_0`and the àrticles in
+    :param minmaxscale: boolean, if to apply min_max scaling on the scores or not
+    :return: pandas Series of proximity scores between the articles in `articles_0`and the àrticles in
     `articles_1
     """
     scores = []
@@ -177,15 +217,16 @@ def get_scores_pairs(articles_0, articles_1, scale, length, relevant_embeddings,
         matrices = get_articles_matrices([articles_0[i], articles_1[i]], relevant_embeddings)
         append_word_distance(matrices, length)
         matrix_0, matrix_1 = matrices[0], matrices[1]
-        sq_distances = get_sq_distances(matrix_0, matrix_1)
+        sq_distances = get_distances(matrix_0, matrix_1, distance)
         score = get_score(sq_distances, scale, kernel)
         scores.append(score)
-    min_score, max_score = min(scores), max(scores)
-    scores = pd.Series([(s - min_score) / (max_score - min_score) for s in scores])
-    return scores
+    if minmaxscale:
+        min_score, max_score = min(scores), max(scores)
+        scores = [(s - min_score) / (max_score - min_score) for s in scores]
+    return pd.Series(scores)
 
 
-def calibrate(articles_0, articles_1, true_values, word_embedding_file_path, scale_values, length_values, normalize_values=[True, False], kernels=['gaussian'], prop=1, patience=1000, language='english'):
+def calibrate(articles_0, articles_1, true_values, word_embedding_file_path, scale_values, length_values, normalize_values=[True, False], kernels=['gaussian'], distances=['euclidian'], prop=1, patience=1000, language='english'):
     """
     Gridsearch of hyperparameter values, possiblility to control the extent of the search through `prop` and `patience`
     :param articles_0: first list of articles (texts, strings)
@@ -196,6 +237,7 @@ def calibrate(articles_0, articles_1, true_values, word_embedding_file_path, sca
     :param length_values: numpy array containing the values to test for the length parameter of the kernel
     :param normalize_values: list (max. length=2) of booleans for the normalize parameter of the word embeddings
     :param kernels: list of names (strings) of kernels to test
+    :param distances: type of distance to apply between word vectors, 'euclidian', 'cosine' or both
     :param prop: proportion of the hyperparameter combinations to test, sampled at random
     :param patience: number of tests without improvement before breaing the search
     :param language: string, language for which nltk has a list of stop words
@@ -206,8 +248,8 @@ def calibrate(articles_0, articles_1, true_values, word_embedding_file_path, sca
     logger.info('Searching for best scale and length values...')
     t0 = time.time()
     y_true = pd.Series(true_values)
-    ap_score_best, kernel_best, scale_best, length_best = -1, None, None, None
-    values_to_test = list(itertools.product(*[kernels, scale_values, length_values]))
+    ap_score_best = -1
+    values_to_test = list(itertools.product(*[kernels, scale_values, length_values, distances]))
     indices_to_test = np.random.choice(len(values_to_test), size=int(round(prop * len(values_to_test))), replace=False)
     indices_to_test = [int(ind) for ind in indices_to_test]
     values_to_test = list(operator.itemgetter(*indices_to_test)(values_to_test))
@@ -215,11 +257,11 @@ def calibrate(articles_0, articles_1, true_values, word_embedding_file_path, sca
     for normalize in normalize_values:
         relevant_embeddings = get_relevant_embeddings(articles_0 + articles_1, word_embedding_file_path, language, normalize)
         n_unsuccessful_trials = 0
-        for kernel, scale, length in values_to_test:
+        for kernel, scale, length, distance in values_to_test:
             if n_unsuccessful_trials >= patience:
                 logger.info('No better hyperparameters found after {} trials, break'.format(patience))
                 break
-            scores = get_scores_pairs(articles_0, articles_1, length, scale, relevant_embeddings, kernel)
+            scores = get_scores_pairs(articles_0, articles_1, scale, length, relevant_embeddings, kernel, distance)
             ap_score = average_precision_score(y_true[scores >= 0], scores[scores >= 0])
             if ap_score > ap_score_best:
                 n_unsuccessful_trials = 0
@@ -228,15 +270,16 @@ def calibrate(articles_0, articles_1, true_values, word_embedding_file_path, sca
                 scale_best = scale
                 length_best = length
                 normalize_best = normalize
-                logger.info('Better parameters found: kernel=\'{}\', scale_best={}, length_best={}, normalize={}, corresponding best average precision: {}'.format(kernel_best, scale_best, length_best, normalize, ap_score_best))
+                distance_best = distance
+                logger.info('Better parameters found: kernel=\'{}\', scale_best={}, length_best={}, normalize={}, distance_best: {},  corresponding best average precision: {}'.format(kernel_best, scale_best, length_best, normalize, distance, ap_score_best))
             else:
                 n_unsuccessful_trials += 1
 
     logger.info('Best scale and length values out of {} combinations from {} pairs computed in {}s'.format(len(values_to_test), len(articles_0), round(time.time() - t0, 1)))
-    return kernel_best, scale_best, length_best, normalize_best, ap_score_best
+    return kernel_best, scale_best, length_best, normalize_best, distance_best, ap_score_best
 
 
-def calibrate_bayes(articles_0, articles_1, true_values, word_embedding_file_path,  scale_range=(0, 1), length_range=(0, .1), kernel='gaussian', max_evals=1000, normalize=True, language='english'):
+def calibrate_bayes(articles_0, articles_1, true_values, word_embedding_file_path,  scale_range=(0, 1), length_range=(0, .1), kernel='gaussian', distance='euclidian', max_evals=1000, normalize=True, language='english'):
     """
     Bayesian search of hyperparameter values for scale and length. `kernel` and `normalize` must be fixed.
     :param articles_0: first list of articles (texts, strings)
@@ -246,6 +289,7 @@ def calibrate_bayes(articles_0, articles_1, true_values, word_embedding_file_pat
     :param scale_range: (min_scale, max_scale) of the kernel scale parameter. If sequence, will take the min, and max. values of it
     :param length_range: (min_length, max_length) of the kernel length parameter. If sequence, will take the min, and max. values of it
     :param kernel: name of the kernel to test, one of the kernel names accepted by get_score()
+    :param distance: type of distance to apply between word vectors, 'euclidian', 'cosine' or both
     :param max_evals: maximal number of evaluations made by the Bayes optimizer
     :param normalize: boolean, notmalize word embedding vectors or not
     :param language: string, language for which nltk has a list of stop words
@@ -259,7 +303,7 @@ def calibrate_bayes(articles_0, articles_1, true_values, word_embedding_file_pat
 
     def objective(args):
         scale, length = args
-        scores = get_scores_pairs(articles_0, articles_1, scale. length, relevant_embeddings, kernel)
+        scores = get_scores_pairs(articles_0, articles_1, scale, length, relevant_embeddings, kernel, distance)
         ap_score = average_precision_score(true_values[scores >= 0], scores[scores >= 0])
         return 1 - ap_score
 
@@ -269,7 +313,7 @@ def calibrate_bayes(articles_0, articles_1, true_values, word_embedding_file_pat
     return best
 
 
-def evaluate(articles_0, articles_1, scale, length, word_embedding_file_path, kernel='gaussian', language='english', normalize=False):
+def evaluate(articles_0, articles_1, scale, length, word_embedding_file_path, kernel='gaussian', distance='euclidian', language='english', normalize=False):
     """
     Evaluates proximity between articles in `articles_0` and articles in `articles_1`, proximity scores min_max scaled
     :param articles_0: first list of articles (texts, strings)
@@ -286,6 +330,6 @@ def evaluate(articles_0, articles_1, scale, length, word_embedding_file_path, ke
     relevant_embeddings = get_relevant_embeddings(articles_0 + articles_1, word_embedding_file_path, language, normalize)
     logger.info('computing pair scores...')
     t0 = time.time()
-    scores = get_scores_pairs(articles_0, articles_1, scale, length, relevant_embeddings, kernel)
+    scores = get_scores_pairs(articles_0, articles_1, scale, length, relevant_embeddings, kernel, distance)
     logger.info('scores for {} pairs computed in {}s'.format(len(articles_0), round(time.time() - t0, 1)))
     return scores

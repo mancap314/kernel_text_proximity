@@ -178,22 +178,22 @@ def get_score(distances, scale=.1, kernel='gaussian'):
     if scale == 0:
         scale += eps
     if kernel in ['inverse', 'circular']:  # kernels with division by `sq_distances`
-        distances[distances==0] = eps
-    distances /= scale ** 2
+        distances[distances==0] = eps  # to avoid division by 0
+    distances /= scale
     if kernel == 'gaussian':
-        transfo = np.exp(-distances)
+        transfo = np.exp(-distances ** 2)
     if kernel == 'inverse':
-        transfo = np.minimum(1 / np.square(distances), 1)
+        transfo = np.minimum(1 / distances, 1)
     if kernel == 'triangle':
-        transfo = np.maximum(1 - np.square(distances), 0)
+        transfo = np.maximum(1 - distances, 0)
     if kernel == 'epanechnikov':
-        transfo = np.maximum(1 - np.square(distances), 0)
+        transfo = np.maximum(1 - distances, 0)
     if kernel == 'quadratic':
-        transfo = np.maximum(np.square(1 -np.square(distances)), 0)
+        transfo = np.maximum(np.square(1 - distances), 0)
     if kernel == 'cubic':
-        transfo = np.maximum(np.power(1 - np.square(distances), 3), 0)
+        transfo = np.maximum(np.power(1 - distances, 3), 0)
     if kernel == 'circular':
-        transfo = np.maximum(np.cos(np.pi / (2 * distances)), 0)
+        transfo = np.maximum(np.cos(np.pi / (2 * distances ** 2)), 0)
     if kernel == 'student':
         transfo = 1 / (1 + distances ** 2)
     return np.mean(np.sum(transfo, 0))  # compute the sum by word (axis 0) and take the average
